@@ -5,7 +5,7 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 
 from .http import CrawlError
-from .sandbox import Product
+from .product import Product
 
 COLUMNS = tuple(field.name for field in fields(Product))
 

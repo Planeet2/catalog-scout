@@ -7,9 +7,10 @@ from typing import Sequence
 import requests
 from playwright.sync_api import Error as BrowserError
 
+from . import adafruit, sandbox
 from .export import check_output, export_products
 from .http import USER_AGENT, CrawlError, PublicHttpClient
-from .sandbox import ORIGIN, discover_products, parse_product
+from .product import Product
 
 logger = logging.getLogger(__name__)
 
@@ -28,21 +29,52 @@ def positive_seconds(value: str) -> float:
     return number
 
 
-def main(argv: Sequence[str] | None = None, *, origin: str = ORIGIN) -> int:
-    parser = argparse.ArgumentParser(description="Export products from Agenty's Scraping Sandbox.")
-    parser.add_argument("--category", help='Exact storefront category label, e.g. "Electronics"')
+def collect_sandbox(
+    client: PublicHttpClient,
+    origin: str,
+    category: str | None,
+    limit: int | None,
+) -> list[Product]:
+    robots = client.load_robots(origin)
+    urls = sandbox.discover_products(client, robots, origin, category, limit)
+    for url in urls:
+        if not robots.can_fetch(USER_AGENT, url):
+            raise CrawlError(f"robots.txt disallows {url}")
+
+    products = []
+    for index, url in enumerate(urls, start=1):
+        product = sandbox.parse_product(client.get(url).content, url)
+        if category not in (None, "All Categories", product.category):
+            raise CrawlError(f"Unexpected category {product.category!r} on {url}")
+        products.append(product)
+        if index % 50 == 0 or index == len(urls):
+            logger.info("Validated %d/%d products", index, len(urls))
+    return products
+
+
+def main(argv: Sequence[str] | None = None, *, origin: str | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Export products from a supported storefront.")
+    parser.add_argument(
+        "--source",
+        choices=("sandbox", "adafruit"),
+        default="sandbox",
+        help="Storefront to collect (default: sandbox)",
+    )
+    parser.add_argument("--category", help='Sandbox category label, e.g. "Electronics"')
+    parser.add_argument(
+        "--category-id", type=positive_int,
+        help="Adafruit category ID (default: 166 for Raspberry Pi accessories)",
+    )
     parser.add_argument("--limit", type=positive_int, help="Collect up to this many products")
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("output/products.csv"),
-        help="Destination .csv or .xlsx file (default: output/products.csv)",
+        help="Destination .csv or .xlsx file (default: output/products.csv or output/adafruit.csv)",
     )
     parser.add_argument(
         "--delay",
         type=positive_seconds,
-        default=0.5,
-        help="Minimum interval in seconds between sequential HTTP requests (default: 0.5)",
+        help="Minimum interval in seconds between HTTP requests (0.5 for Sandbox, 12 for Adafruit)",
     )
     parser.add_argument(
         "--timeout",
@@ -51,32 +83,32 @@ def main(argv: Sequence[str] | None = None, *, origin: str = ORIGIN) -> int:
         help="Timeout in seconds for HTTP and browser operations (default: 20)",
     )
     args = parser.parse_args(argv)
-    if args.delay < 0.5:
+    is_adafruit = args.source == "adafruit"
+    if is_adafruit and args.category is not None:
+        parser.error("use --category-id to select an Adafruit category")
+    if not is_adafruit and args.category_id is not None:
+        parser.error("--category-id requires --source adafruit")
+    default_delay = adafruit.REQUEST_DELAY if is_adafruit else 0.5
+    if args.delay is not None and args.delay < 0.5:
         parser.error("--delay must be at least 0.5 seconds")
+    output = args.output or Path("output/adafruit.csv" if is_adafruit else "output/products.csv")
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     try:
-        check_output(args.output)
+        check_output(output)
         with requests.Session() as session:
-            client = PublicHttpClient(session, args.delay, args.timeout)
-            robots = client.load_robots(origin)
-            urls = discover_products(client, robots, origin, args.category, args.limit)
+            client = PublicHttpClient(session, args.delay or default_delay, args.timeout)
+            if is_adafruit:
+                products = adafruit.collect_products(
+                    client,
+                    origin or adafruit.ORIGIN,
+                    args.category_id or adafruit.DEFAULT_CATEGORY,
+                    args.limit,
+                )
+            else:
+                products = collect_sandbox(client, origin or sandbox.ORIGIN, args.category, args.limit)
 
-            # Validate all destinations before the first product request.
-            for url in urls:
-                if not robots.can_fetch(USER_AGENT, url):
-                    raise CrawlError(f"robots.txt disallows {url}")
-
-            products = []
-            for index, url in enumerate(urls, start=1):
-                product = parse_product(client.get(url).content, url)
-                if args.category not in (None, "All Categories", product.category):
-                    raise CrawlError(f"Unexpected category {product.category!r} on {url}")
-                products.append(product)
-                if index % 50 == 0 or index == len(urls):
-                    logger.info("Validated %d/%d products", index, len(urls))
-
-        export_products(args.output, products)
+        export_products(output, products)
     except BrowserError as exc:
         message = str(exc).splitlines()[0]
         if "Executable doesn't exist" in message:
@@ -90,5 +122,5 @@ def main(argv: Sequence[str] | None = None, *, origin: str = ORIGIN) -> int:
         logger.info("Crawl interrupted")
         return 130
 
-    logger.info("Wrote %d products to %s", len(products), args.output)
+    logger.info("Wrote %d products to %s", len(products), output)
     return 0

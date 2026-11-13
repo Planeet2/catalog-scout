@@ -1,7 +1,6 @@
 import json
 import logging
 import re
-from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from urllib.parse import urljoin, urlsplit
 from urllib.robotparser import RobotFileParser
@@ -10,6 +9,7 @@ from bs4 import BeautifulSoup
 from playwright.sync_api import Route, sync_playwright
 
 from .http import USER_AGENT, CrawlError, PublicHttpClient
+from .product import Product
 
 ORIGIN = "https://scrapingsandbox.com"
 CARDS = "main a.product-card[href]"
@@ -17,22 +17,6 @@ NEXT = "main button:has(svg.lucide-chevron-right)"
 RESULTS = re.compile(r"^([\d,]+)\s+results? found$", re.IGNORECASE)
 PRODUCT_PATH = re.compile(r"/product/([1-9]\d*)/?$")
 logger = logging.getLogger(__name__)
-
-
-@dataclass(frozen=True, slots=True)
-class Product:
-    product_id: int
-    sku: str
-    name: str
-    category: str
-    price: Decimal
-    original_price: Decimal | None
-    currency: str
-    rating: Decimal
-    review_count: int
-    availability: str
-    product_url: str
-    image_url: str
 
 
 def product_url(href: str, origin: str) -> str:
